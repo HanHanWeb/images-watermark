@@ -526,6 +526,14 @@ async function confirmExport() {
   </div>
 </template>
 
+<style>
+/* 全局重置：去掉 body 默认外边距，避免页面四周出现白边 */
+body {
+  margin: 0;
+  background: #f5f7fa;
+}
+</style>
+
 <style scoped>
 .page {
   min-height: 100vh;
