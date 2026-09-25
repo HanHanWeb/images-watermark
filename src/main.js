@@ -1,22 +1,17 @@
 import { createApp } from 'vue'
-import ElementPlus, { ElNotification } from 'element-plus'
+import ElementPlus from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import 'element-plus/dist/index.css'
 import 'element-plus/theme-chalk/dark/css-vars.css'
-import { registerSW } from 'virtual:pwa-register'
 import App from './App.vue'
 
-// 新版本就绪时通知，用户点击后统一刷新，保证页面资源版本一致
-const updateSW = registerSW({
-  onNeedRefresh() {
-    ElNotification({
-      title: '发现新版本',
-      message: '点击刷新更新到最新版',
-      type: 'info',
-      duration: 0,
-      onClick: () => updateSW(true),
-    })
-  },
-})
+// 清理早期 PWA 版本注册的 Service Worker 和缓存，避免旧缓存导致样式丢失；
+// 确认所有用户都已更新后可移除这段
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.getRegistrations().then((rs) => rs.forEach((r) => r.unregister()))
+}
+if ('caches' in window) {
+  caches.keys().then((keys) => keys.forEach((k) => caches.delete(k)))
+}
 
 createApp(App).use(ElementPlus, { locale: zhCn }).mount('#app')

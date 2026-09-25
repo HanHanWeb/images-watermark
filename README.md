@@ -2,7 +2,7 @@
 
 纯前端图片加水印工具：支持图片水印和文字水印，九宫格选择位置，可调大小 / 边距 / 不透明度，批量导出。所有处理均在浏览器本地完成，图片不经过任何服务器。
 
-技术栈：Vue 3 + Vite + Element Plus + 原生 Canvas + JSZip，PWA（vite-plugin-pwa），HEIC 支持（heic2any 按需加载）。
+技术栈：Vue 3 + Vite + Element Plus + 原生 Canvas + JSZip，HEIC 支持（heic2any 按需加载）。
 
 ## 功能
 
@@ -14,7 +14,6 @@
 - **批量上传**：多选、拖拽、整个文件夹拖入
 - **HEIC 支持**：iPhone 照片可直接使用（heic2any 按需动态加载，不影响首屏体积）
 - **导出**：导出前弹窗选择质量（低 / 中 / 高（原图），仅对 JPEG/WebP 生效，PNG 无损），保留原格式与原图分辨率，多张打包 ZIP，输出文件名为 `原名_watermark.扩展名`
-- **PWA**：可安装到桌面 / 手机主屏，离线可用
 
 ## 开发
 
@@ -26,7 +25,7 @@ npm run dev
 ## 构建
 
 ```bash
-npm run build    # 产物在 dist/（含 Service Worker 与 manifest）
+npm run build    # 产物在 dist/
 npm run preview  # 本地预览构建产物
 ```
 
@@ -35,8 +34,8 @@ npm run preview  # 本地预览构建产物
 - 方式一：代码推到 GitHub 后，在 vercel.com 导入仓库，框架会自动识别为 Vite（构建命令 `npm run build`，输出目录 `dist`），直接点部署即可。
 - 方式二：命令行 `npm i -g vercel && vercel`。
 
-纯静态站点，不需要任何环境变量或服务端配置。注意 Service Worker 要求 HTTPS（或 localhost），Vercel 默认满足。
+纯静态站点，不需要任何环境变量或服务端配置。
 
 ## 测试素材
 
-`test-assets/` 下有脚本生成的示例图（`target.jpg`、`target2.jpg`、`watermark.png`），可直接用来试用；`gen.ps1` / `gen-icons.ps1` 是生成它们的 PowerShell 脚本。
+`test-assets/` 下有脚本生成的示例图（`target.jpg`、`target2.jpg`、`watermark.png`），可直接用来试用；`gen.ps1` 是生成它们的 PowerShell 脚本。
