@@ -6,7 +6,8 @@ export default defineConfig({
   plugins: [
     vue(),
     VitePWA({
-      registerType: 'autoUpdate',
+      // 提示后手动更新：新版本就绪时由用户确认刷新，避免新旧资源混用
+      registerType: 'prompt',
       includeAssets: ['icon-192.png', 'icon-512.png'],
       manifest: {
         name: '图片水印工具',
