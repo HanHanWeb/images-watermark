@@ -40,12 +40,12 @@ const positions = [
 }
 .cell {
   height: 40px;
-  border: 1px solid #dcdfe6;
+  border: 1px solid var(--iw-border);
   border-radius: 6px;
-  background: #fff;
+  background: var(--iw-content-bg);
   cursor: pointer;
   font-size: 13px;
-  color: #606266;
+  color: var(--iw-text-primary);
   transition: all 0.15s;
 }
 .cell:hover {

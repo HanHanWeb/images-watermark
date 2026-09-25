@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { ElMessage, genFileId } from 'element-plus'
-import { Delete, Download, Files, Loading, Picture, Setting, Stamp, UploadFilled, View } from '@element-plus/icons-vue'
+import { Delete, Download, Files, Loading, Moon, Picture, Setting, Stamp, Sunny, UploadFilled, View } from '@element-plus/icons-vue'
 import JSZip from 'jszip'
 import PositionGrid from './components/PositionGrid.vue'
 import { composite, downloadBlob, loadBitmap, processFile } from './utils/image'
@@ -247,7 +247,35 @@ watch([wmMode, settings, textSettings, () => exportDialog.quality], () => {
   }, 300)
 }, { deep: true })
 
+// ---------- 深浅色主题 ----------
+const THEME_KEY = 'iw-theme'
+const isDark = ref(false)
+
+function applyTheme(dark) {
+  document.documentElement.classList.toggle('dark', dark)
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#0a0a0a' : '#409eff')
+}
+
+watch(isDark, (dark) => {
+  applyTheme(dark)
+  try {
+    localStorage.setItem(THEME_KEY, dark ? 'dark' : 'light')
+  } catch {
+    /* 忽略存储错误 */
+  }
+})
+
 onMounted(async () => {
+  // 恢复主题：没存过偏好时跟随系统
+  let saved = null
+  try {
+    saved = localStorage.getItem(THEME_KEY)
+  } catch {
+    /* 忽略存储错误 */
+  }
+  isDark.value = saved ? saved === 'dark' : !!window.matchMedia?.('(prefers-color-scheme: dark)').matches
+  applyTheme(isDark.value)
+
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')
     if (saved.wmMode === 'image' || saved.wmMode === 'text') wmMode.value = saved.wmMode
@@ -347,8 +375,19 @@ async function confirmExport() {
 <template>
   <div class="page">
     <header class="header">
-      <h1 class="title"><el-icon class="title-icon"><Stamp /></el-icon>图片水印工具</h1>
-      <p>所有图片仅在你的浏览器本地处理，不会上传到任何服务器</p>
+      <div class="header-row">
+        <div>
+          <h1 class="title"><el-icon class="title-icon"><Stamp /></el-icon>图片水印工具</h1>
+          <p>所有图片仅在你的浏览器本地处理，不会上传到任何服务器</p>
+        </div>
+        <el-switch
+          v-model="isDark"
+          inline-prompt
+          :active-icon="Moon"
+          :inactive-icon="Sunny"
+          title="切换深浅色"
+        />
+      </div>
     </header>
 
     <main class="layout">
@@ -357,7 +396,7 @@ async function confirmExport() {
           <template #header>
             <div class="preview-header">
               <div class="preview-title"><el-icon><View /></el-icon><b>实时预览</b></div>
-              <span class="tip">{{ previewInfo || '显示第 1 张图片的效果' }}</span>
+              <span class="tip">{{ previewInfo }}</span>
             </div>
           </template>
           <div
@@ -527,17 +566,36 @@ async function confirmExport() {
 </template>
 
 <style>
+/* 颜色变量：暗色模式在 html.dark 下覆盖 */
+:root {
+  --iw-page-bg: #f5f7fa;
+  --iw-content-bg: #ffffff;
+  --iw-border: #dcdfe6;
+  --iw-text-primary: #303133;
+  --iw-text-secondary: #909399;
+  --iw-check-a: #f0f2f5;
+  --iw-check-b: #ffffff;
+}
+html.dark {
+  --iw-page-bg: #0a0a0a;
+  --iw-content-bg: #141414;
+  --iw-border: #4c4d4f;
+  --iw-text-primary: #e5eaf3;
+  --iw-text-secondary: #a3a6ad;
+  --iw-check-a: #262727;
+  --iw-check-b: #1d1d1d;
+}
 /* 全局重置：去掉 body 默认外边距，避免页面四周出现白边 */
 body {
   margin: 0;
-  background: #f5f7fa;
+  background: var(--iw-page-bg);
 }
 </style>
 
 <style scoped>
 .page {
   min-height: 100vh;
-  background: #f5f7fa;
+  background: var(--iw-page-bg);
 }
 .header {
   padding: 20px 32px 0;
@@ -553,9 +611,15 @@ body {
 .title-icon {
   color: #409eff;
 }
+.header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
 .header p {
   margin: 4px 0 0;
-  color: #909399;
+  color: var(--iw-text-secondary);
   font-size: 13px;
 }
 .layout {
@@ -594,7 +658,7 @@ body {
   color: #409eff;
 }
 .tip {
-  color: #909399;
+  color: var(--iw-text-secondary);
   font-size: 12px;
   font-weight: normal;
 }
@@ -629,7 +693,7 @@ body {
 .setting .label {
   margin-bottom: 10px;
   font-size: 14px;
-  color: #303133;
+  color: var(--iw-text-primary);
   display: flex;
   justify-content: space-between;
   align-items: baseline;
@@ -638,14 +702,14 @@ body {
   max-height: 120px;
   max-width: 100%;
   border-radius: 4px;
-  background: conic-gradient(#f0f2f5 25%, #fff 0 50%, #f0f2f5 0 75%, #fff 0) 0 0 / 16px 16px;
+  background: conic-gradient(var(--iw-check-a) 25%, var(--iw-check-b) 0 50%, var(--iw-check-a) 0 75%, var(--iw-check-b) 0) 0 0 / 16px 16px;
 }
 .wm-meta {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-top: 6px;
-  color: #909399;
+  color: var(--iw-text-secondary);
   font-size: 12px;
 }
 .preview {
@@ -665,7 +729,7 @@ body {
   justify-content: center;
   border-radius: 4px;
   padding: 8px;
-  background: conic-gradient(#f0f2f5 25%, #fff 0 50%, #f0f2f5 0 75%, #fff 0) 0 0 / 20px 20px;
+  background: conic-gradient(var(--iw-check-a) 25%, var(--iw-check-b) 0 50%, var(--iw-check-a) 0 75%, var(--iw-check-b) 0) 0 0 / 20px 20px;
   user-select: none;
   cursor: pointer;
 }
@@ -673,7 +737,7 @@ body {
   max-width: 100%;
   max-height: 60vh;
   display: block;
-  box-shadow: 0 0 0 1px #dcdfe6 inset;
+  box-shadow: 0 0 0 1px var(--iw-border) inset;
 }
 .thumb-strip {
   display: flex;
@@ -690,7 +754,7 @@ body {
   border: 2px solid transparent;
   cursor: pointer;
   flex-shrink: 0;
-  background: conic-gradient(#f0f2f5 25%, #fff 0 50%, #f0f2f5 0 75%, #fff 0) 0 0 / 12px 12px;
+  background: conic-gradient(var(--iw-check-a) 25%, var(--iw-check-b) 0 50%, var(--iw-check-a) 0 75%, var(--iw-check-b) 0) 0 0 / 12px 12px;
 }
 .thumb-strip img.active {
   border-color: #409eff;
@@ -698,19 +762,19 @@ body {
 .quality-label {
   margin-bottom: 16px;
   font-size: 14px;
-  color: #303133;
+  color: var(--iw-text-primary);
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 .quality-caption {
   margin-top: 12px;
-  color: #909399;
+  color: var(--iw-text-secondary);
   font-size: 12px;
 }
 .export-info {
   margin-top: 28px;
-  color: #909399;
+  color: var(--iw-text-secondary);
   font-size: 12px;
 }
 @media (max-width: 900px) {
