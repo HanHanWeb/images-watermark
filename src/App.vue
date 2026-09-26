@@ -309,6 +309,15 @@ function toggleExclude(uid) {
   else next.add(uid)
   excludedUids.value = next
 }
+const allSelected = computed(
+  () => thumbs.value.length > 0 && includedImages.value.length === thumbs.value.length,
+)
+const someSelected = computed(
+  () => includedImages.value.length > 0 && includedImages.value.length < thumbs.value.length,
+)
+function toggleAll(checked) {
+  excludedUids.value = checked ? new Set() : new Set(thumbs.value.map((t) => t.uid))
+}
 
 // ---------- 进度恢复：未导出的图片列表存 IndexedDB，导出成功即清除 ----------
 watch(() => fileList.value.map((f) => f.raw), (files) => {
@@ -614,23 +623,12 @@ async function confirmExport() {
             <el-button text size="small" @click="dismissHoldHint">知道了</el-button>
           </div>
           <div v-if="thumbs.length" class="thumb-strip">
-            <div
-              v-for="(t, i) in thumbs"
-              :key="t.url"
-              class="thumb-item"
-              :class="{ excluded: isExcluded(t.uid) }"
-            >
+            <div v-for="(t, i) in thumbs" :key="t.url" class="thumb-item">
               <img
                 :src="t.url"
                 :title="t.name"
                 :class="{ active: i === previewIndex }"
                 @click="previewIndex = i"
-              />
-              <el-checkbox
-                class="thumb-check"
-                :model-value="!isExcluded(t.uid)"
-                title="勾选后参与导出"
-                @change="toggleExclude(t.uid)"
               />
               <el-icon class="thumb-remove" title="移除这张图片" @click.stop="removeImage(i)">
                 <CircleCloseFilled />
@@ -812,6 +810,32 @@ async function confirmExport() {
         <el-radio-button value="high">高（原图）</el-radio-button>
       </el-radio-group>
       <div class="quality-caption">{{ qualityCaptions[exportDialog.quality] }}</div>
+      <div class="pick-header">
+        <span class="pick-title">选择图片</span>
+        <el-checkbox
+          :model-value="allSelected"
+          :indeterminate="someSelected"
+          @change="toggleAll"
+        >全选</el-checkbox>
+      </div>
+      <div class="img-pick-list">
+        <div
+          v-for="t in thumbs"
+          :key="t.uid"
+          class="img-pick-item"
+          :class="{ off: isExcluded(t.uid) }"
+          @click="toggleExclude(t.uid)"
+        >
+          <img :src="t.url" />
+          <span class="img-pick-name" :title="t.name">{{ t.name }}</span>
+          <el-checkbox
+            class="img-pick-check"
+            :model-value="!isExcluded(t.uid)"
+            @click.stop
+            @change="toggleExclude(t.uid)"
+          />
+        </div>
+      </div>
       <div class="quality-label name-field">
         文件名
         <span class="tip">支持 {name} 原文件名、{i} 序号、{date} 日期</span>
@@ -1071,19 +1095,60 @@ body {
 .thumb-remove:hover {
   color: #f56c6c;
 }
-.thumb-item.excluded img {
-  opacity: 0.3;
+.pick-header {
+  margin-top: 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 14px;
+  color: var(--iw-text-primary);
 }
-.thumb-check {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  z-index: 1;
+.pick-title {
+  font-weight: 500;
+}
+.img-pick-list {
+  margin-top: 8px;
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid var(--iw-border);
+  border-radius: 6px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.img-pick-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.img-pick-item:hover {
+  background: var(--iw-check-a);
+}
+.img-pick-item.off img {
+  opacity: 0.35;
+}
+.img-pick-item img {
+  width: 32px;
+  height: 32px;
+  object-fit: cover;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.img-pick-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--iw-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.img-pick-check {
   height: auto;
-}
-.thumb-check :deep(.el-checkbox__inner) {
-  width: 14px;
-  height: 14px;
 }
 .thumb-check :deep(.el-checkbox__inner::after) {
   height: 7px;
