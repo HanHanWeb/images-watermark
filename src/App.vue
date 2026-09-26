@@ -1,11 +1,11 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
-import { ElMessage, genFileId } from 'element-plus'
-import { Delete, Download, Files, Loading, Moon, Picture, Setting, Stamp, Sunny, UploadFilled, View } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox, genFileId } from 'element-plus'
+import { CircleCloseFilled, Delete, Download, Loading, Moon, Picture, Plus, Setting, Stamp, Star, Sunny, UploadFilled, View } from '@element-plus/icons-vue'
 import JSZip from 'jszip'
 import PositionGrid from './components/PositionGrid.vue'
 import { composite, downloadBlob, loadBitmap, processFile } from './utils/image'
-import { filesFromDataTransfer } from './utils/files'
+import { filesFromDataTransfer, isImageFile } from './utils/files'
 import { idbDelete, idbGet, idbSet } from './utils/store'
 
 const SETTINGS_KEY = 'iw-settings'
@@ -19,7 +19,7 @@ const watermarkBitmap = shallowRef(null)
 const watermarkInfo = ref('')
 
 const fileList = ref([])
-const imagesUploadRef = ref(null)
+const imagesInputRef = ref(null)
 const rawImages = computed(() => fileList.value.map((f) => f.raw).filter(Boolean))
 
 const settings = reactive({
@@ -27,7 +27,73 @@ const settings = reactive({
   scalePct: 20,
   marginPct: 2,
   opacity: 100,
+  layout: 'single',
+  rotation: 0,
+  tileGapPct: 50,
+  shadowPct: 0,
 })
+
+// ---------- 预设：保存 / 应用 / 删除 ----------
+const PRESETS_KEY = 'iw-presets'
+const presets = ref([])
+const selectedPreset = ref('')
+
+function persistPresets() {
+  try {
+    localStorage.setItem(PRESETS_KEY, JSON.stringify(presets.value))
+  } catch {
+    /* 忽略存储错误 */
+  }
+}
+
+function applyPreset(name) {
+  const p = presets.value.find((x) => x.name === name)
+  if (!p) return
+  wmMode.value = p.wmMode
+  Object.assign(settings, p.settings)
+  Object.assign(textSettings, p.textSettings)
+  if (wmMode.value === 'text' && textSettings.font !== 'system') {
+    ensureFont(textSettings.font, textSettings.content).then(schedulePreview)
+  }
+  ElMessage.success(`已应用预设「${p.name}」`)
+}
+
+async function savePreset() {
+  const current = presets.value.find((x) => x.name === selectedPreset.value)
+  try {
+    const { value } = await ElMessageBox.prompt('保存当前的水印模式、位置、大小、边距、透明度及文字设置', '保存预设', {
+      inputValue: current?.name ?? '',
+      inputPattern: /\S/,
+      inputErrorMessage: '名称不能为空',
+      confirmButtonText: '保存',
+      cancelButtonText: '取消',
+    })
+    const name = value.trim()
+    const preset = {
+      name,
+      wmMode: wmMode.value,
+      settings: { ...settings },
+      textSettings: { ...textSettings },
+    }
+    const idx = presets.value.findIndex((x) => x.name === name)
+    if (idx >= 0) presets.value[idx] = preset
+    else presets.value.push(preset)
+    selectedPreset.value = name
+    persistPresets()
+    ElMessage.success(idx >= 0 ? `预设「${name}」已更新` : `预设「${name}」已保存`)
+  } catch {
+    /* 用户取消 */
+  }
+}
+
+function removePreset() {
+  const name = selectedPreset.value
+  if (!name) return
+  presets.value = presets.value.filter((x) => x.name !== name)
+  selectedPreset.value = ''
+  persistPresets()
+  ElMessage.success(`预设「${name}」已删除`)
+}
 const textSettings = reactive({
   content: '',
   font: 'system',
@@ -62,7 +128,12 @@ async function ensureFont(family, text) {
     const link = document.createElement('link')
     link.rel = 'stylesheet'
     link.href = f.css
-    document.head.appendChild(link)
+    // 必须等样式表加载完、@font-face 注册后，fonts.load 才能真正触发分片下载
+    await new Promise((resolve) => {
+      link.onload = resolve
+      link.onerror = resolve // 样式表加载失败时也继续，用回退字体渲染
+      document.head.appendChild(link)
+    })
   }
   try {
     // 传入实际文字，让浏览器只加载包含这些字符的字体分片
@@ -91,7 +162,7 @@ watch(
 
 // 导出质量弹窗：低/中/高 三档，质量仅对 JPEG/WebP 等有损格式生效，PNG 始终无损
 const QUALITY_MAP = { low: 0.6, mid: 0.8, high: 1 }
-const exportDialog = reactive({ visible: false, quality: 'high' })
+const exportDialog = reactive({ visible: false, quality: 'high', nameTemplate: '{name}_watermark', keepExif: false })
 const qualityCaptions = {
   low: '文件最小，画质压缩较明显',
   mid: '兼顾画质与文件大小',
@@ -122,6 +193,21 @@ const previewFile = computed(() => rawImages.value[previewIndex.value] ?? rawIma
 const previewCanvas = ref(null)
 const previewInfo = ref('')
 const showOriginal = ref(false)
+// 首次使用提示：点"知道了"或实际按住过一次后永久隐藏
+const holdHintVisible = ref(true)
+try {
+  holdHintVisible.value = localStorage.getItem('iw-hold-hint') !== '1'
+} catch {
+  holdHintVisible.value = true
+}
+function dismissHoldHint() {
+  holdHintVisible.value = false
+  try {
+    localStorage.setItem('iw-hold-hint', '1')
+  } catch {
+    /* 忽略存储错误 */
+  }
+}
 const thumbs = ref([])
 
 let previewTimer = null
@@ -134,25 +220,45 @@ watch([previewFile, wmSource], schedulePreview, { flush: 'post' })
 watch(settings, schedulePreview, { deep: true, flush: 'post' })
 
 let renderSeq = 0
+// 解码结果按文件缓存：滑块高频重绘时避免反复解码大图
+const previewBitmapCache = { file: null, bitmap: null }
+async function getPreviewBitmap(file) {
+  if (previewBitmapCache.file === file && previewBitmapCache.bitmap) return previewBitmapCache.bitmap
+  previewBitmapCache.bitmap?.close?.()
+  const bitmap = await loadBitmap(file)
+  previewBitmapCache.file = file
+  previewBitmapCache.bitmap = bitmap
+  return bitmap
+}
+
 async function renderPreview() {
   const canvas = previewCanvas.value
   const file = previewFile.value
   if (!canvas || !file) return
   const seq = ++renderSeq
   try {
-    const bitmap = await loadBitmap(file)
-    const c = composite(bitmap, showOriginal.value ? null : wmSource.value, settings, 1000, 600)
-    if (seq !== renderSeq) {
-      bitmap.close?.()
-      return
-    }
+    const bitmap = await getPreviewBitmap(file)
+    const tw = bitmap.naturalWidth || bitmap.width
+    const th = bitmap.naturalHeight || bitmap.height
+    // 按"显示尺寸 × 设备像素比"渲染：视觉与原图一致，又不必全分辨率渲染
+    const stage = canvas.parentElement
+    const dpr = Math.min(window.devicePixelRatio || 1, 2)
+    const availW = Math.max(100, (stage?.clientWidth ?? 800) - 16)
+    const availH = Math.max(100, window.innerHeight * 0.6)
+    const s = Math.min(1, (availW * dpr) / tw, (availH * dpr) / th)
+    const c = composite(bitmap, showOriginal.value ? null : wmSource.value, settings, availW * dpr, availH * dpr)
+    if (seq !== renderSeq) return
     canvas.width = c.width
     canvas.height = c.height
+    if (s < 1) {
+      canvas.style.width = `${Math.round(c.width / dpr)}px`
+      canvas.style.height = `${Math.round(c.height / dpr)}px`
+    } else {
+      canvas.style.width = ''
+      canvas.style.height = ''
+    }
     canvas.getContext('2d').drawImage(c, 0, 0)
-    const w = bitmap.naturalWidth || bitmap.width
-    const h = bitmap.naturalHeight || bitmap.height
-    previewInfo.value = `原图 ${w} × ${h} · 按住图片看原图`
-    bitmap.close?.()
+    previewInfo.value = `原图 ${tw} × ${th}`
   } catch (e) {
     console.error(e)
     if (seq === renderSeq) {
@@ -162,10 +268,16 @@ async function renderPreview() {
   }
 }
 
+function onWindowResize() {
+  schedulePreview()
+}
+window.addEventListener('resize', onWindowResize)
+
 // 按住看原图
 function previewDown() {
   if (!wmSource.value) return
   showOriginal.value = true
+  dismissHoldHint()
   renderPreview()
 }
 function previewUp() {
@@ -175,10 +287,36 @@ function previewUp() {
 }
 
 // 缩略图条：给每张目标图建一个 object URL，列表变化时回收旧的
-watch(rawImages, (files) => {
+watch(() => fileList.value.map((f) => ({ raw: f.raw, uid: f.uid })), (items) => {
   thumbs.value.forEach((t) => URL.revokeObjectURL(t.url))
-  thumbs.value = files.map((f) => ({ name: f.name, url: URL.createObjectURL(f) }))
-  if (previewIndex.value >= files.length) previewIndex.value = Math.max(0, files.length - 1)
+  thumbs.value = items
+    .filter((it) => it.raw)
+    .map((it) => ({ name: it.raw.name, uid: it.uid, url: URL.createObjectURL(it.raw) }))
+  if (previewIndex.value >= thumbs.value.length) previewIndex.value = Math.max(0, thumbs.value.length - 1)
+})
+
+// ---------- 导出勾选：默认全部参与，可取消勾选跳过 ----------
+const excludedUids = ref(new Set())
+const includedImages = computed(() =>
+  fileList.value.filter((f) => f.raw && !excludedUids.value.has(f.uid)).map((f) => f.raw),
+)
+function isExcluded(uid) {
+  return excludedUids.value.has(uid)
+}
+function toggleExclude(uid) {
+  const next = new Set(excludedUids.value)
+  if (next.has(uid)) next.delete(uid)
+  else next.add(uid)
+  excludedUids.value = next
+}
+
+// ---------- 进度恢复：未导出的图片列表存 IndexedDB，导出成功即清除 ----------
+watch(() => fileList.value.map((f) => f.raw), (files) => {
+  if (!files.length) {
+    idbDelete('progress').catch(() => {})
+    return
+  }
+  idbSet('progress', files).catch(() => {})
 })
 
 // ---------- 水印上传 ----------
@@ -212,23 +350,44 @@ async function clearWatermark() {
   }
 }
 
+// ---------- 添加图片（预览区点击 / 缩略图"+"按钮 / 拖拽文件夹） ----------
+function addImages(files) {
+  for (const f of files) {
+    if (!isImageFile(f)) continue
+    fileList.value.push({ name: f.name, raw: f, uid: genFileId(), status: 'ready' })
+  }
+}
+
+function openImagesPicker() {
+  imagesInputRef.value?.click()
+}
+
+function onImagesChange(e) {
+  addImages([...(e.target.files ?? [])])
+  e.target.value = '' // 清空以便下次能选同一文件
+}
+
+function removeImage(index) {
+  fileList.value.splice(index, 1)
+}
+
 // ---------- 文件夹拖入 ----------
 async function onDropCapture(e) {
   const dt = e.dataTransfer
   if (!dt) return
   // entry 必须在事件回调里同步取出，事件结束后 dataTransfer 不可读
   const entries = [...(dt.items ?? [])].map((i) => i.webkitGetAsEntry?.()).filter(Boolean)
-  if (!entries.some((en) => en.isDirectory)) return // 普通文件拖拽仍走 el-upload 自身逻辑
+  if (!entries.some((en) => en.isDirectory)) return // 普通文件拖拽交给浏览器原生行为
   e.preventDefault()
   e.stopPropagation()
   const files = await filesFromDataTransfer(dt, entries)
-  for (const f of files) imagesUploadRef.value?.handleStart(f)
+  addImages(files)
   if (files.length) ElMessage.success(`已从文件夹添加 ${files.length} 张图片`)
 }
 
 // ---------- 设置记忆 ----------
 let saveTimer = null
-watch([wmMode, settings, textSettings, () => exportDialog.quality], () => {
+watch([wmMode, settings, textSettings, exportDialog], () => {
   clearTimeout(saveTimer)
   saveTimer = setTimeout(() => {
     try {
@@ -239,6 +398,8 @@ watch([wmMode, settings, textSettings, () => exportDialog.quality], () => {
           settings: { ...settings },
           textSettings: { ...textSettings },
           quality: exportDialog.quality,
+          nameTemplate: exportDialog.nameTemplate,
+          keepExif: exportDialog.keepExif,
         }),
       )
     } catch {
@@ -282,11 +443,38 @@ onMounted(async () => {
     Object.assign(settings, saved.settings ?? {})
     Object.assign(textSettings, saved.textSettings ?? {})
     if (['low', 'mid', 'high'].includes(saved.quality)) exportDialog.quality = saved.quality
+    if (typeof saved.nameTemplate === 'string' && saved.nameTemplate.trim()) exportDialog.nameTemplate = saved.nameTemplate
+    if (typeof saved.keepExif === 'boolean') exportDialog.keepExif = saved.keepExif
   } catch {
     /* 配置损坏时用默认值 */
   }
+  try {
+    const list = JSON.parse(localStorage.getItem(PRESETS_KEY) || '[]')
+    if (Array.isArray(list)) presets.value = list.filter((p) => p && p.name)
+  } catch {
+    /* 预设损坏时忽略 */
+  }
   if (wmMode.value === 'text' && textSettings.font !== 'system') {
     ensureFont(textSettings.font, textSettings.content).then(schedulePreview)
+  }
+  try {
+    const stored = await idbGet('progress')
+    if (Array.isArray(stored) && stored.length) {
+      try {
+        await ElMessageBox.confirm(
+          `上次有 ${stored.length} 张图片还没有导出，要恢复继续处理吗？`,
+          '发现未导出的进度',
+          { confirmButtonText: '恢复', cancelButtonText: '不恢复', type: 'info' },
+        )
+        addImages(stored)
+        ElMessage.success('已恢复上次的图片列表')
+      } catch {
+        // 不恢复：清掉存储，避免下次再问
+        await idbDelete('progress').catch(() => {})
+      }
+    }
+  } catch {
+    /* 读取失败忽略 */
   }
   try {
     const blob = await idbGet('watermark')
@@ -297,6 +485,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('resize', onWindowResize)
+  previewBitmapCache.bitmap?.close?.()
   if (watermarkUrl.value) URL.revokeObjectURL(watermarkUrl.value)
   thumbs.value.forEach((t) => URL.revokeObjectURL(t.url))
 })
@@ -311,15 +501,15 @@ function requestExport() {
     ElMessage.warning('请先上传水印图片')
     return
   }
-  if (!rawImages.value.length) {
-    ElMessage.warning('请先上传待处理图片')
+  if (!includedImages.value.length) {
+    ElMessage.warning(rawImages.value.length ? '请至少勾选一张要导出的图片' : '请先上传待处理图片')
     return
   }
   exportDialog.visible = true
 }
 
 async function exportAll(overrides = {}) {
-  const files = rawImages.value
+  const files = includedImages.value
   const wm = wmSource.value
   exporting.value = true
   progress.total = files.length
@@ -329,7 +519,7 @@ async function exportAll(overrides = {}) {
   try {
     if (files.length === 1) {
       try {
-        const { blob, filename } = await processFile(files[0], wm, exportSettings)
+        const { blob, filename } = await processFile(files[0], wm, exportSettings, 0)
         downloadBlob(blob, filename)
       } catch (e) {
         console.error(e)
@@ -338,9 +528,9 @@ async function exportAll(overrides = {}) {
       progress.done = 1
     } else {
       const zip = new JSZip()
-      for (const file of files) {
+      for (const [i, file] of files.entries()) {
         try {
-          const { blob, filename } = await processFile(file, wm, exportSettings)
+          const { blob, filename } = await processFile(file, wm, exportSettings, i)
           zip.file(filename, blob)
         } catch (e) {
           console.error(e)
@@ -360,6 +550,8 @@ async function exportAll(overrides = {}) {
       ElMessage.warning(`有 ${failed.length} 张处理失败（可能是浏览器不支持的格式）：${failed.join('、')}`)
     } else {
       ElMessage.success('导出完成，已开始下载')
+      // 导出成功即视为进度已消费，清除未导出记录
+      idbDelete('progress').catch(() => {})
     }
   } finally {
     exporting.value = false
@@ -368,7 +560,11 @@ async function exportAll(overrides = {}) {
 
 async function confirmExport() {
   exportDialog.visible = false
-  await exportAll({ quality: QUALITY_MAP[exportDialog.quality] })
+  await exportAll({
+    quality: QUALITY_MAP[exportDialog.quality],
+    nameTemplate: exportDialog.nameTemplate,
+    keepExif: exportDialog.keepExif,
+  })
 }
 </script>
 
@@ -391,8 +587,9 @@ async function confirmExport() {
     </header>
 
     <main class="layout">
+      <div class="left-col">
       <section class="preview">
-        <el-card shadow="never" class="preview-card">
+        <el-card shadow="never" class="preview-card" @dragover.capture.prevent @drop.capture="onDropCapture">
           <template #header>
             <div class="preview-header">
               <div class="preview-title"><el-icon><View /></el-icon><b>实时预览</b></div>
@@ -409,21 +606,69 @@ async function confirmExport() {
           >
             <canvas ref="previewCanvas" class="preview-canvas"></canvas>
           </div>
-          <el-empty v-else description="先上传待处理图片" />
-          <div v-if="thumbs.length > 1" class="thumb-strip">
-            <img
+          <div v-else class="preview-empty" @click="openImagesPicker">
+            <el-empty description="点击上传图片，或拖拽图片 / 整个文件夹到这里" />
+          </div>
+          <div v-if="holdHintVisible && wmSource" class="hold-hint-bar">
+            <span>小提示：按住图片可临时查看无水印原图</span>
+            <el-button text size="small" @click="dismissHoldHint">知道了</el-button>
+          </div>
+          <div v-if="thumbs.length" class="thumb-strip">
+            <div
               v-for="(t, i) in thumbs"
               :key="t.url"
-              :src="t.url"
-              :title="t.name"
-              :class="{ active: i === previewIndex }"
-              @click="previewIndex = i"
-            />
+              class="thumb-item"
+              :class="{ excluded: isExcluded(t.uid) }"
+            >
+              <img
+                :src="t.url"
+                :title="t.name"
+                :class="{ active: i === previewIndex }"
+                @click="previewIndex = i"
+              />
+              <el-checkbox
+                class="thumb-check"
+                :model-value="!isExcluded(t.uid)"
+                title="勾选后参与导出"
+                @change="toggleExclude(t.uid)"
+              />
+              <el-icon class="thumb-remove" title="移除这张图片" @click.stop="removeImage(i)">
+                <CircleCloseFilled />
+              </el-icon>
+            </div>
+            <div class="thumb-add" title="添加图片" @click="openImagesPicker">
+              <el-icon><Plus /></el-icon>
+            </div>
           </div>
+          <input
+            ref="imagesInputRef"
+            type="file"
+            accept="image/*,.heic,.heif"
+            multiple
+            hidden
+            @change="onImagesChange"
+          />
         </el-card>
       </section>
+      </div>
 
       <section class="panel">
+        <el-button
+          type="primary"
+          size="large"
+          class="export-btn"
+          :icon="Download"
+          :loading="exporting"
+          :disabled="!includedImages.length || !wmSource"
+          @click="requestExport"
+        >
+          {{ exporting ? `正在导出 ${progress.done}/${progress.total}…` : `导出${includedImages.length ? `（${includedImages.length} 张）` : ''}` }}
+        </el-button>
+        <el-progress
+          v-if="exporting && progress.total > 1"
+          :percentage="Math.round((progress.done / progress.total) * 100)"
+        />
+
         <el-card shadow="never" class="card">
           <template #header>
             <div class="card-header"><el-icon><Picture /></el-icon><b>水印内容</b></div>
@@ -493,53 +738,66 @@ async function confirmExport() {
 
         <el-card shadow="never" class="card">
           <template #header>
-            <div class="card-header"><el-icon><Files /></el-icon><b>待处理图片（{{ rawImages.length }} 张）</b></div>
-          </template>
-          <div @dragover.capture.prevent @drop.capture="onDropCapture">
-            <el-upload ref="imagesUploadRef" v-model:file-list="fileList" :auto-upload="false" multiple accept="image/*,.heic,.heif" drag>
-              <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
-              <div class="el-upload__text">点击或拖拽图片到这里，可多选，支持整个文件夹</div>
-            </el-upload>
-          </div>
-        </el-card>
-
-        <el-card shadow="never" class="card">
-          <template #header>
             <div class="card-header"><el-icon><Setting /></el-icon><b>水印设置</b></div>
           </template>
           <div class="setting">
+            <div class="label">预设</div>
+            <div class="preset-row">
+              <el-select
+                v-model="selectedPreset"
+                class="preset-select"
+                placeholder="选择预设"
+                clearable
+                @change="applyPreset"
+              >
+                <el-option v-for="p in presets" :key="p.name" :label="p.name" :value="p.name" />
+              </el-select>
+              <el-button title="保存当前设置为预设" :icon="Star" @click="savePreset" />
+              <el-button title="删除选中的预设" :icon="Delete" :disabled="!selectedPreset" @click="removePreset" />
+            </div>
+          </div>
+          <div v-if="settings.layout === 'single'" class="setting">
             <div class="label">位置</div>
             <PositionGrid v-model="settings.position" />
           </div>
-          <div v-if="wmMode === 'image'" class="setting">
-            <div class="label">水印大小<span class="tip">占图片宽度 {{ settings.scalePct }}%</span></div>
-            <el-slider v-model="settings.scalePct" :min="5" :max="100" :step="1" />
+          <div class="setting">
+            <div class="label">布局</div>
+            <el-radio-group v-model="settings.layout">
+              <el-radio-button value="single">单个</el-radio-button>
+              <el-radio-button value="tile">平铺</el-radio-button>
+            </el-radio-group>
           </div>
           <div class="setting">
-            <div class="label">边距<span class="tip">图片宽度的 {{ settings.marginPct }}%</span></div>
+            <div class="label">旋转角度</div>
+            <el-slider
+              v-model="settings.rotation"
+              :min="-180"
+              :max="180"
+              :step="5"
+              :marks="{ '-90': '-90°', 0: '0°', 90: '90°' }"
+            />
+          </div>
+          <div v-if="wmMode === 'image'" class="setting">
+            <div class="label">水印大小</div>
+            <el-slider v-model="settings.scalePct" :min="5" :max="100" :step="1" />
+          </div>
+          <div v-if="settings.layout === 'single'" class="setting">
+            <div class="label">边距</div>
             <el-slider v-model="settings.marginPct" :min="0" :max="15" :step="0.5" />
+          </div>
+          <div v-if="settings.layout === 'tile'" class="setting">
+            <div class="label">平铺间距</div>
+            <el-slider v-model="settings.tileGapPct" :min="0" :max="100" :step="5" />
           </div>
           <div class="setting">
             <div class="label">不透明度<span class="tip">{{ settings.opacity }}%</span></div>
             <el-slider v-model="settings.opacity" :min="10" :max="100" :step="1" />
           </div>
+          <div class="setting">
+            <div class="label">阴影</div>
+            <el-slider v-model="settings.shadowPct" :min="0" :max="10" :step="0.5" />
+          </div>
         </el-card>
-
-        <el-button
-          type="primary"
-          size="large"
-          class="export-btn"
-          :icon="Download"
-          :loading="exporting"
-          :disabled="!rawImages.length || !wmSource"
-          @click="requestExport"
-        >
-          {{ exporting ? `正在导出 ${progress.done}/${progress.total}…` : `导出${rawImages.length ? `（${rawImages.length} 张）` : ''}` }}
-        </el-button>
-        <el-progress
-          v-if="exporting && progress.total > 1"
-          :percentage="Math.round((progress.done / progress.total) * 100)"
-        />
       </section>
     </main>
 
@@ -554,8 +812,18 @@ async function confirmExport() {
         <el-radio-button value="high">高（原图）</el-radio-button>
       </el-radio-group>
       <div class="quality-caption">{{ qualityCaptions[exportDialog.quality] }}</div>
+      <div class="quality-label name-field">
+        文件名
+        <span class="tip">支持 {name} 原文件名、{i} 序号、{date} 日期</span>
+      </div>
+      <el-input v-model="exportDialog.nameTemplate" placeholder="{name}_watermark" />
+      <div class="quality-label name-field">
+        保留照片信息（EXIF）
+        <span class="tip">仅对 JPEG 生效；默认关闭，避免拍摄位置等敏感信息外泄</span>
+      </div>
+      <el-switch v-model="exportDialog.keepExif" />
       <div class="export-info">
-        将导出 {{ rawImages.length }} 张图片{{ rawImages.length > 1 ? '，打包为 ZIP' : '，直接下载' }}。
+        将导出 {{ includedImages.length }} 张图片{{ includedImages.length > 1 ? '，打包为 ZIP' : '，直接下载' }}。
       </div>
       <template #footer>
         <el-button @click="exportDialog.visible = false">取消</el-button>
@@ -671,6 +939,13 @@ body {
 .font-select {
   width: 100%;
 }
+.preset-row {
+  display: flex;
+  gap: 8px;
+}
+.preset-select {
+  flex: 1;
+}
 .font-label {
   justify-content: flex-start;
   align-items: center;
@@ -712,9 +987,12 @@ body {
   color: var(--iw-text-secondary);
   font-size: 12px;
 }
-.preview {
+.left-col {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
   position: sticky;
   top: 16px;
 }
@@ -733,11 +1011,24 @@ body {
   user-select: none;
   cursor: pointer;
 }
+.hold-hint-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 0 4px;
+  color: var(--iw-text-secondary);
+  font-size: 12px;
+}
 .preview-canvas {
   max-width: 100%;
   max-height: 60vh;
   display: block;
   box-shadow: 0 0 0 1px var(--iw-border) inset;
+}
+.preview-empty {
+  cursor: pointer;
 }
 .thumb-strip {
   display: flex;
@@ -746,6 +1037,10 @@ body {
   margin-top: 12px;
   padding: 2px;
 }
+.thumb-item {
+  position: relative;
+  flex-shrink: 0;
+}
 .thumb-strip img {
   width: 56px;
   height: 56px;
@@ -753,11 +1048,64 @@ body {
   border-radius: 6px;
   border: 2px solid transparent;
   cursor: pointer;
-  flex-shrink: 0;
+  display: block;
   background: conic-gradient(var(--iw-check-a) 25%, var(--iw-check-b) 0 50%, var(--iw-check-a) 0 75%, var(--iw-check-b) 0) 0 0 / 12px 12px;
 }
 .thumb-strip img.active {
   border-color: #409eff;
+}
+.thumb-remove {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  font-size: 18px;
+  color: var(--iw-text-secondary);
+  background: var(--iw-content-bg);
+  border-radius: 50%;
+  cursor: pointer;
+  display: none;
+}
+.thumb-item:hover .thumb-remove {
+  display: block;
+}
+.thumb-remove:hover {
+  color: #f56c6c;
+}
+.thumb-item.excluded img {
+  opacity: 0.3;
+}
+.thumb-check {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  z-index: 1;
+  height: auto;
+}
+.thumb-check :deep(.el-checkbox__inner) {
+  width: 14px;
+  height: 14px;
+}
+.thumb-check :deep(.el-checkbox__inner::after) {
+  height: 7px;
+  left: 4px;
+  top: 1px;
+}
+.thumb-add {
+  width: 56px;
+  height: 56px;
+  flex-shrink: 0;
+  border: 1px dashed var(--iw-border);
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--iw-text-secondary);
+  cursor: pointer;
+  font-size: 18px;
+}
+.thumb-add:hover {
+  border-color: #409eff;
+  color: #409eff;
 }
 .quality-label {
   margin-bottom: 16px;
@@ -772,6 +1120,9 @@ body {
   color: var(--iw-text-secondary);
   font-size: 12px;
 }
+.name-field {
+  margin-top: 16px;
+}
 .export-info {
   margin-top: 28px;
   color: var(--iw-text-secondary);
@@ -782,10 +1133,6 @@ body {
     flex-direction: column;
   }
   .panel {
-    width: 100%;
-  }
-  .preview {
-    position: static;
     width: 100%;
   }
 }

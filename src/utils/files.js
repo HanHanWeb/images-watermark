@@ -1,4 +1,4 @@
-function isImageFile(f) {
+export function isImageFile(f) {
   return f.type.startsWith('image/') || /\.(heic|heif|jpe?g|png|webp|bmp|gif)$/i.test(f.name || '')
 }
 
